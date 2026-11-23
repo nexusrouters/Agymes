@@ -5,7 +5,7 @@ model:
 fallback_providers: []
 agent:
   max_turns: 150
-  gateway_timeout: 1800
+  gateway_timeout: 3600
   restart_drain_timeout: 180
   verbose: false
   reasoning_effort: medium

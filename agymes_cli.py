@@ -341,7 +341,8 @@ def cmd_setup(agymes_home: Path, hermes_home: Path) -> int:
         f"AGY_WORKDIR={wd}",
         f"AGY_BIN={resolve_agy_bin()}",
         "AGY_MODE=auto",
-        "AGY_TIMEOUT_SECONDS=600",
+        "AGY_TIMEOUT_SECONDS=0",
+        "AGY_IDLE_TIMEOUT_SECONDS=900",
     ]
     env_path.write_text("\n".join(out) + "\n", encoding="utf-8")
     os.chmod(env_path, 0o600)

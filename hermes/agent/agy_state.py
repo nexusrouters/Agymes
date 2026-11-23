@@ -54,7 +54,8 @@ VALID_EFFORTS = ("", "low", "medium", "high", "xhigh", "max")
 DEFAULT_WORKDIR = os.environ.get("AGY_WORKDIR", "").strip() or str(Path.home())
 DEFAULT_MODE = os.environ.get("AGY_MODE", "auto").strip() or "auto"
 AGY_BIN = _resolve_agy_bin()
-PRINT_TIMEOUT = int(os.environ.get("AGY_TIMEOUT_SECONDS", "600"))
+PRINT_TIMEOUT = int(os.environ.get("AGY_TIMEOUT_SECONDS", "0"))
+IDLE_TIMEOUT = int(os.environ.get("AGY_IDLE_TIMEOUT_SECONDS", "900"))
 
 _SINGLETON_LOCK = threading.Lock()
 _ACCOUNT_MANAGER: AccountManager | None = None
@@ -200,6 +201,7 @@ __all__ = [
     "BOT_BASE_DIR",
     "DEFAULT_MODE",
     "DEFAULT_WORKDIR",
+    "IDLE_TIMEOUT",
     "PRINT_TIMEOUT",
     "VALID_EFFORTS",
     "VALID_MODES",

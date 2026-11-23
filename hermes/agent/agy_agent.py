@@ -28,6 +28,7 @@ from agent.agy_state import (
     AGY_BIN,
     BOT_BASE_DIR,
     DEFAULT_WORKDIR,
+    IDLE_TIMEOUT,
     PRINT_TIMEOUT,
     VALID_EFFORTS,
     VALID_MODES,
@@ -532,27 +533,38 @@ class AgyAIAgent:
             with self._proc_lock:
                 self._active_proc = proc
 
+            last_activity = [time.monotonic()]
+            idle_timed_out = False
+
             def _drain_stderr(p: subprocess.Popen[str], sink: list[str]) -> None:
                 if p.stderr is None:
                     return
                 for line in p.stderr:
+                    last_activity[0] = time.monotonic()
                     if len(sink) < 200:
                         sink.append(line.rstrip("\n"))
 
             stderr_thread = threading.Thread(target=_drain_stderr, args=(proc, stderr_lines), daemon=True)
             stderr_thread.start()
 
-            deadline = time.monotonic() + (PRINT_TIMEOUT + 30 if PRINT_TIMEOUT > 0 else 86400)
+            wall_deadline = (time.monotonic() + PRINT_TIMEOUT + 30) if PRINT_TIMEOUT > 0 else None
 
             def _timeout_watcher(p: subprocess.Popen[str]) -> None:
-                nonlocal timed_out
+                nonlocal timed_out, idle_timed_out
                 while p.poll() is None:
-                    if time.monotonic() > deadline:
+                    now_m = time.monotonic()
+                    if wall_deadline is not None and now_m > wall_deadline:
                         timed_out = True
                         with contextlib.suppress(OSError):
                             p.terminate()
                         break
-                    time.sleep(0.5)
+                    if IDLE_TIMEOUT > 0 and (now_m - last_activity[0]) > IDLE_TIMEOUT:
+                        timed_out = True
+                        idle_timed_out = True
+                        with contextlib.suppress(OSError):
+                            p.terminate()
+                        break
+                    time.sleep(1.0)
 
             watchdog = threading.Thread(target=_timeout_watcher, args=(proc,), daemon=True)
             watchdog.start()
@@ -560,6 +572,7 @@ class AgyAIAgent:
             try:
                 assert proc.stdout is not None
                 for raw_line in proc.stdout:
+                    last_activity[0] = time.monotonic()
                     if self.is_interrupted:
                         break
                     line = raw_line.strip()
@@ -687,14 +700,17 @@ class AgyAIAgent:
             }
 
         if timed_out:
+            limit_desc = f"diam >{IDLE_TIMEOUT} detik tanpa aktivitas" if idle_timed_out else f"melewati batas {PRINT_TIMEOUT} detik"
+            chat_state.update_chat(chat_key, last_account=used_account, model=self.model)
+            partial_note = f"\n\n{stream_buf.strip()}" if stream_buf.strip() else ""
             return {
-                "final_response": f"⏱️ Waktu habis ({PRINT_TIMEOUT} detik) pada akun `{used_account}`. Coba pecah tugasnya atau kirim /new.",
+                "final_response": f"⏱️ Tugas dihentikan karena {limit_desc} pada akun `{used_account}`. Kirim **lanjutkan** untuk meneruskan dari progres terakhir.{partial_note}",
                 "messages": hermes_hist,
                 "api_calls": 1,
                 "completed": False,
                 "failed": True,
                 "interrupted": False,
-                "error": f"Timeout ({PRINT_TIMEOUT}s) on account {used_account}",
+                "error": f"Timeout ({limit_desc}) on account {used_account}",
                 "provider": "antigravity",
                 "model": self.model,
                 "agent_persisted": False,
