@@ -535,6 +535,50 @@ class GatewayModelCommandsMixin:
             non_blocking_catalogs=True, probe_custom_providers=False, probe_current_custom_provider=True,
         )
         adapter = self._delivery_adapter_for(ctx.source)
+        if (
+            adapter is not None
+            and getattr(type(adapter), "send_model_picker", None) is not None
+            and str(display_provider or "").strip().lower() in ("antigravity", "agy", "agymes", "antigravity-cli")
+        ):
+            import sys as _sys
+            from providers import get_provider_profile as _get_prof
+            _prof = _get_prof("antigravity")
+            ag_mod = _sys.modules.get(_prof.__class__.__module__) if _prof is not None else None
+            if ag_mod is not None and hasattr(ag_mod, "get_agy_models_grouped"):
+                force_ref = "--refresh" in (event.get_command_args() or "")
+                providers, current_family, label_map = await asyncio.to_thread(
+                    ag_mod.get_agy_models_grouped,
+                    ctx.current_model or "",
+                    force_refresh=force_ref,
+                )
+                if providers:
+                    from gateway.approval_actor import opener_authority
+
+                    async def _agymes_on_model_selected(_chat_id: str, model_id: str, _family_slug: str) -> str:
+                        if profile_home is None:
+                            result, error = await self._perform_model_switch(ctx, model_id, "antigravity", event.source)
+                            if error is not None:
+                                return error
+                            return await self._commit_model_switch(result, ctx, source=event.source, picker=True)
+                        from gateway.run import _profile_runtime_scope
+                        with _profile_runtime_scope(profile_home):
+                            result, error = await self._perform_model_switch(ctx, model_id, "antigravity", event.source)
+                            if error is not None:
+                                return error
+                            return await self._commit_model_switch(result, ctx, source=event.source, picker=True)
+
+                    _agymes_on_model_selected.prompt_authority = opener_authority(event)
+                    res = await adapter.send_model_picker(
+                        chat_id=ctx.source.chat_id,
+                        providers=providers,
+                        current_model=ctx.current_model or "",
+                        current_provider=current_family,
+                        session_key=ctx.session_key,
+                        on_model_selected=_agymes_on_model_selected,
+                        metadata=self._thread_metadata_for_source(ctx.source, self._reply_anchor_for_event(event)),
+                    )
+                    if getattr(res, "success", False):
+                        return None
         if adapter is not None and getattr(type(adapter), "send_model_picker", None) is not None:
             async def _picker_switch(model_id: str, provider_slug: str) -> str:
                 # The picker callback binds the raw event source (pre-normalization).

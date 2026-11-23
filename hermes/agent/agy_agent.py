@@ -443,6 +443,20 @@ class AgyAIAgent:
         candidates = accounts.plan_candidates(rotation_mode, pinned_account)
         if not candidates:
             candidates = [{"name": "default", "home": str(Path.home())}]
+        # Smart model-aware ordering: prioritize accounts that actually offer self.model
+        if len(candidates) > 1 and self.model and self.model != "default":
+            try:
+                from providers import get_provider_profile
+                prof = get_provider_profile("antigravity")
+                mod = __import__(prof.__class__.__module__, fromlist=["get_account_models_map"]) if prof else None
+                acc_models = mod.get_account_models_map(force_refresh=False) if (mod and hasattr(mod, "get_account_models_map")) else {}
+                if acc_models:
+                    matching = [a for a in candidates if a["name"] in acc_models and self.model in acc_models[a["name"]]]
+                    if matching:
+                        others = [a for a in candidates if a not in matching]
+                        candidates = [*matching, *others]
+            except Exception:
+                pass
 
         hermes_hist = list(conversation_history or [])
         has_shared_turns = shared_history.turn_count(chat_key) > 0
