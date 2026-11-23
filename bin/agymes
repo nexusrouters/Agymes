@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Resolve real path of this wrapper (follows symlinks cleanly)
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ "$SOURCE" != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+BIN_DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
+REPO_ROOT="$(cd "$BIN_DIR/.." && pwd)"
+
+export AGYMES_HOME="${AGYMES_HOME:-$HOME/.agymes}"
+
+# Pick best available Python venv
+if [ -x "$REPO_ROOT/venv/bin/python" ]; then
+  PY="$REPO_ROOT/venv/bin/python"
+elif [ -x "$AGYMES_HOME/venv/bin/python" ]; then
+  PY="$AGYMES_HOME/venv/bin/python"
+elif [ -x "/usr/local/lib/hermes-agent/venv/bin/python" ]; then
+  PY="/usr/local/lib/hermes-agent/venv/bin/python"
+else
+  PY="$(command -v python3)"
+fi
+
+exec "$PY" "$REPO_ROOT/agymes_cli.py" "$@"

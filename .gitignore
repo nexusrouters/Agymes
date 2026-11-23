@@ -1,0 +1,38 @@
+# Secrets & local configuration (NEVER commit)
+.env
+.env.*
+!.env.example
+!templates/.env.example
+config.yaml
+!templates/config.yaml
+
+# Live multi-account profiles & OAuth tokens (NEVER commit)
+accounts.json
+accounts/
+.accounts.lock
+.state.lock
+state.json
+history/
+uploads/
+
+# Runtime home, SQLite DBs, sessions, logs, caches
+hermes_home/
+.agymes/
+*.db
+*.db-shm
+*.db-wal
+*.log
+*.pid
+*.sock
+*.lock
+*.bak*
+
+# Python & OS artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.cache/
+.DS_Store
