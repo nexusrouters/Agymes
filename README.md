@@ -88,9 +88,3 @@ Semua subcommand bawaan Hermes (`skills`, `cron`, `sessions`, `config`, `mcp`, `
 - `/new` — Mulai sesi baru & reset konteks bersama
 - `/stop` — Hentikan proses yang sedang berjalan
 - `/help` — Daftar semua perintah
-
----
-
-## Keamanan & Privasi
-
-Repository ini **tidak mengandung kredensial, token, akun OAuth, maupun riwayat chat pribadi**. Seluruh data pribadi disimpan terisolasi di `~/.agymes/` saat instalasi (`.env`, `accounts.json`, `accounts/`, `state.db`, `history/`).
