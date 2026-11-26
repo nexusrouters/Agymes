@@ -4,11 +4,73 @@
 from __future__ import annotations
 
 import os
+import signal
+import subprocess
 import sys
+import time
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent
 HERMES_FORK_DIR = REPO_ROOT / "hermes"
+RESTART_EXIT_CODE = 75
+
+
+def _run_supervisor() -> None:
+    """Keep the standalone gateway alive across in-chat `/restart` (exit 75)."""
+    script_path = str(Path(__file__).resolve())
+    child_ref: list[subprocess.Popen[bytes] | None] = [None]
+    stopping = False
+
+    def _forward_stop(signum: int, _frame: object) -> None:
+        nonlocal stopping
+        stopping = True
+        proc = child_ref[0]
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.send_signal(signum)
+            except OSError:
+                pass
+
+    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        try:
+            signal.signal(sig, _forward_stop)
+        except (OSError, ValueError):
+            pass
+
+    quick_restarts = 0
+    while True:
+        child_env = dict(os.environ)
+        child_env["AGYMES_GATEWAY_CHILD"] = "1"
+        child_env["HERMES_GATEWAY_EXTERNAL_SUPERVISOR"] = "1"
+        started = time.monotonic()
+        proc = subprocess.Popen(
+            [sys.executable, "-u", script_path, *sys.argv[1:]],
+            env=child_env,
+        )
+        child_ref[0] = proc
+        while True:
+            try:
+                rc = proc.wait()
+                break
+            except KeyboardInterrupt:
+                _forward_stop(signal.SIGINT, None)
+        child_ref[0] = None
+
+        if stopping:
+            sys.exit(0 if rc in (0, -signal.SIGTERM, -signal.SIGINT, -signal.SIGHUP) else rc)
+
+        if rc == RESTART_EXIT_CODE:
+            elapsed = time.monotonic() - started
+            quick_restarts = (quick_restarts + 1) if elapsed < 3.0 else 0
+            delay = 5.0 if quick_restarts > 5 else 0.5
+            print(
+                f"[Agymes] Gateway requested restart (exit {rc}); relaunching in {delay:.1f}s...",
+                flush=True,
+            )
+            time.sleep(delay)
+            continue
+
+        sys.exit(rc)
 
 
 def _resolve_agymes_home() -> Path:
@@ -41,6 +103,10 @@ def _load_env_file(path: Path) -> None:
 
 
 def main() -> None:
+    if os.environ.get("AGYMES_GATEWAY_CHILD") != "1":
+        _run_supervisor()
+        return
+
     # Isolate Agymes Telegram Gateway from unrelated host platform tokens
     for unused_var in (
         "SLACK_BOT_TOKEN",
