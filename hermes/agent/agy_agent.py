@@ -273,6 +273,7 @@ class AgyAIAgent:
         thread_id: str | None = None,
         gateway_session_key: str | None = None,
         session_db: Any = None,
+        persistence: Any = None,
         reasoning_config: Any = None,
         service_tier: Any = None,
         request_overrides: Any = None,
@@ -293,6 +294,7 @@ class AgyAIAgent:
         self.thread_id = thread_id
         self.gateway_session_key = gateway_session_key or ""
         self._session_db = session_db
+        self._persistence = persistence
         self.reasoning_config = reasoning_config
         self.service_tier = service_tier
         self.request_overrides = dict(request_overrides or {}) if isinstance(request_overrides, dict) else {}
@@ -301,6 +303,13 @@ class AgyAIAgent:
         self.session_prompt_tokens: int = 0
         self.session_completion_tokens: int = 0
         self.session_output_tokens: int = 0
+        self.session_total_tokens: int = 0
+        self.session_api_calls: int = 0
+        self._api_call_count: int = 0
+        self._end_session_on_close: bool = False
+        self._checkpoint_mgr: Any = None
+        self._last_flushed_db_idx: int = 0
+        self._cached_system_prompt: str = ""
         self._session_messages: list[dict[str, Any]] = []
         self._primary_runtime: dict[str, Any] = {
             "provider": "antigravity",
@@ -315,6 +324,7 @@ class AgyAIAgent:
         self._silence_marker_needs_reply: bool = False
         self._memory_manager: Any = None
         self._db_flush_scan_prefix: Any = None
+        self.runtime_capabilities: Any = kwargs.get("capabilities")
         self.context_compressor = _AgyContextStub(
             context_length=1_000_000 if "gemini" in self.model.lower() else 200_000,
         )
@@ -367,6 +377,53 @@ class AgyAIAgent:
 
     def close(self) -> None:
         self.release_clients()
+
+    def switch_model(
+        self,
+        new_model: str,
+        new_provider: str = "",
+        api_key: str = "",
+        base_url: str = "",
+        api_mode: str = "",
+        capabilities: Any = None,
+        **kwargs: Any,
+    ) -> bool:
+        """Switch model/runtime fields in-place for `/model` on cached AgyAIAgent instances."""
+        model_name = str(new_model or "").strip()
+        if not model_name:
+            raise ValueError("Model name cannot be empty")
+        old_model = self.model
+        self.model = model_name
+        if new_provider:
+            norm_provider = str(new_provider).strip()
+            self.provider = norm_provider
+            self.requested_provider = norm_provider
+        if base_url:
+            self.base_url = str(base_url).strip()
+        if api_mode:
+            self.api_mode = str(api_mode).strip()
+        self._primary_runtime = {
+            "provider": self.provider,
+            "requested_provider": self.requested_provider,
+            "base_url": self.base_url,
+            "api_mode": self.api_mode,
+        }
+        self.runtime_capabilities = capabilities
+        if hasattr(self, "context_compressor") and self.context_compressor is not None:
+            self.context_compressor.context_length = (
+                1_000_000 if "gemini" in self.model.lower() else 200_000
+            )
+        chat_key = self.chat_id or self.gateway_session_key
+        if chat_key:
+            with contextlib.suppress(Exception):
+                get_chat_state().update_chat(chat_key, model=self.model)
+        logger.info(
+            "AgyAIAgent model switched in-place: %s -> %s (provider=%s)",
+            old_model,
+            self.model,
+            self.provider,
+        )
+        return True
 
     def _emit_status(self, text: str) -> None:
         cb = self.status_callback
@@ -444,6 +501,7 @@ class AgyAIAgent:
         if not candidates:
             candidates = [{"name": "default", "home": str(Path.home())}]
         # Smart model-aware ordering: prioritize accounts that actually offer self.model
+        # and keep strict 1:1 round-robin fairness among eligible accounts.
         if len(candidates) > 1 and self.model and self.model != "default":
             try:
                 from providers import get_provider_profile
@@ -451,9 +509,24 @@ class AgyAIAgent:
                 mod = __import__(prof.__class__.__module__, fromlist=["get_account_models_map"]) if prof else None
                 acc_models = mod.get_account_models_map(force_refresh=False) if (mod and hasattr(mod, "get_account_models_map")) else {}
                 if acc_models:
-                    matching = [a for a in candidates if a["name"] in acc_models and self.model in acc_models[a["name"]]]
-                    if matching:
-                        others = [a for a in candidates if a not in matching]
+                    matching_set = {
+                        a["name"]
+                        for a in candidates
+                        if a["name"] in acc_models and self.model in acc_models[a["name"]]
+                    }
+                    if matching_set:
+                        if rotation_mode == "rotate" and len(matching_set) < len(candidates):
+                            # Re-slice eligible accounts in stable order using the atomic rotation cursor
+                            # so skipped accounts (e.g. akun2 lacking gemini-4-neon) never skew 1:1 fairness.
+                            ordered_matching = [
+                                a for a in accounts.enabled_accounts() if a["name"] in matching_set
+                            ] or [a for a in candidates if a["name"] in matching_set]
+                            rot_idx = int(getattr(accounts, "_data", {}).get("rotation_index") or 1)
+                            start = (rot_idx - 1) % len(ordered_matching)
+                            matching = ordered_matching[start:] + ordered_matching[:start]
+                        else:
+                            matching = [a for a in candidates if a["name"] in matching_set]
+                        others = [a for a in candidates if a["name"] not in matching_set]
                         candidates = [*matching, *others]
             except Exception:
                 pass
@@ -546,6 +619,10 @@ class AgyAIAgent:
             )
             with self._proc_lock:
                 self._active_proc = proc
+                should_terminate = self.is_interrupted
+            if should_terminate and proc.poll() is None:
+                with contextlib.suppress(OSError):
+                    proc.terminate()
 
             last_activity = [time.monotonic()]
             idle_timed_out = False
@@ -700,14 +777,16 @@ class AgyAIAgent:
             break
 
         if self.is_interrupted:
+            interrupt_msg = self.interrupt_message
+            self.clear_interrupt()
             return {
-                "final_response": stream_buf.strip() or "🛑 Proses dihentikan.",
+                "final_response": "",
                 "messages": hermes_hist,
                 "api_calls": 1,
                 "completed": False,
                 "failed": False,
                 "interrupted": True,
-                "interrupt_message": self.interrupt_message,
+                "interrupt_message": interrupt_msg,
                 "provider": "antigravity",
                 "model": self.model,
                 "agent_persisted": False,
@@ -778,6 +857,9 @@ class AgyAIAgent:
         self.session_prompt_tokens += est_in
         self.session_completion_tokens += est_out
         self.session_output_tokens += est_out
+        self.session_total_tokens += est_in + est_out
+        self.session_api_calls += 1
+        self._api_call_count += 1
         self.context_compressor.last_prompt_tokens = est_in + sum(
             len(_history_text(m.get("content"))) // 4 for m in hermes_hist[-20:]
         )
